@@ -29,22 +29,5 @@ function sendLinePushMessage(message, token, targetId) {
   Logger.log(response.getContentText()); // ตรวจสอบสถานะการส่งใน Log
 }
 //---------------------------------------------
-function testSendLinePush() {
-  // ดึงค่า Config จาก Script Properties (ทำหน้าที่เหมือนไฟล์ .env)
-  var scriptProperties = PropertiesService.getScriptProperties();
-  var token = scriptProperties.getProperty("LINE_CHANNEL_ACCESS_TOKEN");
-  var targetGroupId = scriptProperties.getProperty("LINE_TARGET_GROUP_ID");
 
-  // ตรวจสอบว่าตั้งค่า Key เรียบร้อยแล้วหรือยัง
-  if (!token || !targetGroupId) {
-    Logger.log("Error: กรุณาตั้งค่า LINE_CHANNEL_ACCESS_TOKEN และ LINE_TARGET_GROUP_ID ใน Script Properties ก่อน");
-    return;
-  }
-
-  // กำหนดข้อความทดสอบ
-  var testMessage = "ทดสอบการส่งข้อความจาก Google Apps Script ผ่าน LINE Messaging API สวัสดี กู้เกียรติ เกื้อกูล";
-
-  // เรียกใช้งานฟังก์ชันส่งข้อความ
-  sendLinePushMessage(testMessage, token, targetGroupId);
-}
 //-----------------------------------
