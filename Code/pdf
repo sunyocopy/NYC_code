@@ -193,14 +193,14 @@ function processDisapprovedLeave(row) {
   
   if (CONFIG.IS_TESTING_MODE) {
     const testSubject = "[TEST MODE] " + subjectDisapproved;
-    const originalRecipients = [email, approver, 'kukiat.k@niyomchai.com'].filter(Boolean).join(', ');
+    const originalRecipients = [email, approver, 'xxxx'].filter(Boolean).join(', ');
     const testBody = bodyDisapproved + `\n\n--- (Test Mode: Original recipients would be: ${originalRecipients}) ---`;
     MailApp.sendEmail(CONFIG.TEST_EMAIL_RECIPIENT, testSubject, testBody);
     Logger.log(`TEST MODE: ส่งอีเมลปฏิเสธไปที่ ${CONFIG.TEST_EMAIL_RECIPIENT} สำเร็จ`);
   } else {
     MailApp.sendEmail(email, subjectDisapproved, bodyDisapproved);
     MailApp.sendEmail(approver, subjectDisapproved, bodyDisapproved);
-    MailApp.sendEmail('kukiat.k@niyomchai.com', subjectDisapproved, bodyDisapproved);
+    MailApp.sendEmail('xxx', subjectDisapproved, bodyDisapproved);
     Logger.log("ส่งอีเมลปฏิเสธสำเร็จ (โหมดใช้งานจริง)");
   }
   
