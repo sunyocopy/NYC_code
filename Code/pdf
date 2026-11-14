@@ -1,0 +1,215 @@
+// =================================================================
+// CONFIGURATION - ส่วนตั้งค่า
+// =================================================================
+const CONFIG = {
+  // ------ การตั้งค่าสำหรับโหมดทดสอบ ------
+  IS_TESTING_MODE: true, // <<-- ตั้งเป็น true เพื่อทดสอบ, false เพื่อใช้งานจริง
+  TEST_EMAIL_RECIPIENT: "xxx",
+  // ------------------------------------
+
+  API_URL: "https://signature-api-gu2o.onrender.com/sign-pdf",
+  PDF_LEAVE_FOLDER_ID: "xxx",
+  TEMP_FOLDER_ID: "xxx",
+  DOC_TEMPLATE_ID: "xxx",
+  LEAVE_REQUEST_SHEET_NAME: "เอกสารแจ้งลา",
+
+  MEDICAL_CERT_POSITION: {
+    page_num: 0, x: 350, y: 650, width: 200, height: 150
+  }
+};
+
+
+// =================================================================
+// ON EDIT TRIGGER FUNCTION - ฟังก์ชันหลักสำหรับทริกเกอร์
+// =================================================================
+
+/**
+ * ฟังก์ชันนี้จะทำงานทุกครั้งที่มีการแก้ไขใน Spreadsheet
+ * และจะถูกเรียกใช้โดยทริกเกอร์ "On edit"
+ * @param {Object} e Event Object ที่ Google ส่งมาให้โดยอัตโนมัติ
+ */
+function runOnStatusChange(e) {
+  Logger.log("--- เริ่มการทำงานของสคริปต์ ---");
+
+  const range = e.range; // เซลล์ที่มีการแก้ไข
+  const sheet = range.getSheet();
+  const SPREADSHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+
+  // --- ส่วนตรวจสอบเงื่อนไข ---
+  // 1. ตรวจสอบว่าแก้ไขในชีตที่ถูกต้องหรือไม่
+  if (sheet.getName() !== CONFIG.LEAVE_REQUEST_SHEET_NAME) {
+    Logger.log("การทำงานถูกข้าม: การแก้ไขไม่ได้เกิดขึ้นในชีต 'เอกสารแจ้งลา'");
+    return;
+  }
+  Logger.log(`ตรวจพบการแก้ไขในชีต: ${CONFIG.LEAVE_REQUEST_SHEET_NAME}`);
+
+  // 2. ตรวจสอบว่าแก้ไขในคอลัมน์ "จำนวนวันที่ลาอนุมัติ" (คอลัมน์ O) หรือไม่
+  const APPROVED_LEAVE_DAYS_COLUMN = 15; // คอลัมน์ O
+  if (range.getColumn() !== APPROVED_LEAVE_DAYS_COLUMN) {
+    Logger.log(`การทำงานถูกข้าม: การแก้ไขไม่ได้เกิดขึ้นในคอลัมน์ O (คอลัมน์ที่ ${range.getColumn()})`);
+    return;
+  }
+  Logger.log(`ตรวจพบการแก้ไขในคอลัมน์ที่ถูกต้อง: คอลัมน์ O`);
+
+  const row = range.getRow();
+  if (row <= 1) {
+    Logger.log("การทำงานถูกข้าม: ไม่ทำงานกับแถวหัวข้อ");
+    return;
+  }
+  Logger.log(`กำลังประมวลผลข้อมูลในแถวที่: ${row}`);
+
+  // 3. ตรวจสอบว่าค่าในคอลัมน์ "สถานะ" (F) เป็น 'อนุมัติ' หรือ 'ไม่อนุมัติ'
+  const statusValue = sheet.getRange(row, 6).getValue(); // อ่านค่าจากคอลัมน์ F
+  if (statusValue !== 'อนุมัติ' && statusValue !== 'ไม่อนุมัติ') {
+    Logger.log(`การทำงานถูกข้าม: สถานะในคอลัมน์ F ไม่ใช่ 'อนุมัติ' หรือ 'ไม่อนุมัติ' แต่เป็น '${statusValue}'`);
+    return;
+  }
+  Logger.log(`สถานะที่พบในคอลัมน์ F คือ: '${statusValue}'`);
+
+  const cellvalue = statusValue;
+
+  // --- ส่วนป้องกันการทำงานซ้ำ ---
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const logSheet = ss.getSheetByName('Script_Log');
+  if (!logSheet) {
+    Logger.log("ไม่พบชีต 'Script_Log' กรุณาสร้างชีตนี้เพื่อการทำงานที่สมบูรณ์");
+    return;
+  }
+
+  const DOC_ID_COLUMN_INDEX = 3; // คอลัมน์ C (เลขที่เอกสาร)
+  const documentId = sheet.getRange(row, DOC_ID_COLUMN_INDEX).getValue();
+  const processedDocIds = new Set(logSheet.getRange('A2:A').getValues().flat().filter(String));
+
+  if (processedDocIds.has(documentId)) {
+    Logger.log(`การทำงานถูกข้าม: เอกสารเลขที่ ${documentId} (แถวที่ ${row}) ถูกดำเนินการไปแล้ว`);
+    return;
+  }
+  Logger.log(`เอกสารเลขที่ ${documentId} ยังไม่เคยถูกประมวลผลมาก่อน`);
+
+  // --- ส่วนเริ่มประมวลผล ---
+  Logger.log(`--- เริ่มประมวลผลการแจ้งผลการลาสำหรับแถวที่ ${row} ---`);
+  try {
+    if (cellvalue === 'อนุมัติ') {
+      processApprovedLeave(row);
+      Logger.log("เรียกใช้ processApprovedLeave สำเร็จ");
+    } else if (cellvalue === 'ไม่อนุมัติ') {
+      processDisapprovedLeave(row);
+      Logger.log("เรียกใช้ processDisapprovedLeave สำเร็จ");
+    }
+
+    logSheet.appendRow([documentId, new Date(), 'ดำเนินการแล้ว (On Edit)']);
+    Logger.log(`บันทึกการดำเนินการลงในชีต 'Script_Log' แล้ว`);
+
+  } catch (err) {
+    logSheet.appendRow([documentId, new Date(), `เกิดข้อผิดพลาด (On Edit): ${err.message}`]);
+    Logger.log(`เกิดข้อผิดพลาดในการประมวลผล OnEdit แถวที่ ${row}: ${err.toString()}`);
+  }
+  Logger.log("--- สิ้นสุดการทำงานของสคริปต์ ---");
+}
+
+
+// =================================================================
+// PDF & EMAIL PROCESSING - ส่วนประมวลผล
+// =================================================================
+function processApprovedLeave(row) {
+  const SPREADSHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(CONFIG.LEAVE_REQUEST_SHEET_NAME);
+  const data = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+
+  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
+  const chatId = PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
+  let date = Utilities.formatDate(new Date(), "GMT+7", "dd/MM/");
+  let thaiyear = Number(Utilities.formatDate(new Date(), "GMT+7", "yyyy")) + 543;
+  let time = Utilities.formatDate(new Date(), "GMT+7", "HH:mm");
+  let message = `✅ แจ้งผลการขอลาคุณ : ${data[6]}\nเลขที่ : ${data[2]}\nประเภทการลา : ${data[7]}\nวันที่ลา : ${data[8]}\nผลการขอลา : ${data[5]}\nAPPROVER : ${data[10]}\nวันที่แจ้งผล : ${date}${thaiyear} ${time}`;
+  if (token && chatId) {
+    sendTelegramNotify(token, chatId, message);
+    Logger.log("ส่งข้อความ Telegram สำเร็จ");
+  } else {
+    Logger.log("ไม่ได้กำหนดค่า TOKEN หรือ CHAT ID สำหรับ Telegram");
+  }
+  sendChatNotigoogle(message);
+  Logger.log("ส่งข้อความ Google Chat สำเร็จ");
+
+  let finalPdfFile = null;
+  let tempPdfFile = null;
+  let errorMessage = null;
+
+  try {
+    tempPdfFile = createLeaveFormPdf(data);
+    if (!tempPdfFile) throw new Error("ไม่สามารถสร้างไฟล์ PDF ใบลาได้");
+    finalPdfFile = tempPdfFile;
+    Logger.log(`สร้างไฟล์ PDF ใบลาชั่วคราวสำเร็จ ID: ${tempPdfFile.getId()}`);
+
+    const imgPath = data[19];
+    if (imgPath && imgPath.includes('/')) {
+      const medicalCertFile = findFileByPath(imgPath);
+      if (medicalCertFile) {
+        Logger.log(`พบไฟล์ใบรับรองแพทย์ กำลังส่งข้อมูลไปยัง API เพื่อประทับตรา`);
+        const stampedPdfFile = stampImageOnPdfWithApi(tempPdfFile.getId(), medicalCertFile.getId());
+        if (stampedPdfFile) {
+          finalPdfFile = stampedPdfFile;
+          Logger.log(`สร้าง PDF ฉบับสมบูรณ์สำเร็จ ID: ${finalPdfFile.getId()}`);
+        } else {
+          errorMessage = "(***มีใบรับรองแพทย์แนบมา แต่ไม่สามารถประทับลงบน PDF ได้***)";
+          Logger.log("เกิดข้อผิดพลาดในการประทับใบรับรองแพทย์");
+        }
+      } else {
+        errorMessage = `(***ไม่พบไฟล์ใบรับรองแพทย์ที่ระบุใน Drive: ${imgPath}***)`;
+        Logger.log("ไม่พบไฟล์ใบรับรองแพทย์ตาม path ที่กำหนด");
+      }
+    }
+    sendApprovalEmail(data, finalPdfFile, errorMessage);
+    Logger.log("ส่งอีเมลแจ้งผลการอนุมัติสำเร็จ");
+  } finally {
+    if (tempPdfFile && finalPdfFile.getId() !== tempPdfFile.getId()) {
+      tempPdfFile.setTrashed(true);
+      Logger.log(`ลบไฟล์ PDF ชั่วคราว (ID: ${tempPdfFile.getId()}) แล้ว`);
+    }
+  }
+}
+
+function processDisapprovedLeave(row) {
+  const SPREADSHEET_ID = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID');
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(CONFIG.LEAVE_REQUEST_SHEET_NAME);
+  const data = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getDisplayValues()[0];
+  
+  const token = PropertiesService.getScriptProperties().getProperty('TELEGRAM_BOT_TOKEN');
+  const chatId = PropertiesService.getScriptProperties().getProperty('TELEGRAM_CHAT_ID');
+
+  const name = data[6], documentNumber = data[2], type = data[7], leaveDateStart = data[8];
+  const cellvalue = data[5], leaveReasonNote = data[12], approverName = data[10];
+  const email = data[4], approver = data[9];
+  
+  let date = Utilities.formatDate(new Date(), "GMT+7", "dd/MM/");
+  let thaiyear = Number(Utilities.formatDate(new Date(), "GMT+7", "yyyy")) + 543;
+  let time = Utilities.formatDate(new Date(), "GMT+7", "HH:mm");
+
+  let message2 = `🚫แจ้งผลการขอลาคุณ : ${name}\nเลขที่ :${documentNumber}\nประเภทการลา :${type}\nวันที่ลา :${leaveDateStart}\nผลการขอลา :${cellvalue}\nหมายเหตุ : ${leaveReasonNote}\nAPPROVER :${approverName}\nวันที่แจ้งผล : ${date}${thaiyear} ${time}`;
+  let subjectDisapproved = `แจ้งผลการขอลาของคุณ ${name} สถานะ: ${cellvalue}`;
+  let bodyDisapproved = `เรียน คุณ ${name}\n\nขอแจ้งให้ทราบผลการพิจารณาคำขอลาของคุณ เลขที่เอกสาร: ${documentNumber} ดังนี้:\n\nประเภทการลา: ${type}\nวันที่ลา: ${leaveDateStart}\nสถานะ🚫: ${cellvalue}\nเหตุผลที่ไม่อนุมัติ: ${leaveReasonNote}\nAPPROVER : ${approverName}\nวันที่แจ้งผล: ${date}${thaiyear} ${time}\n\nจึงเรียนมาเพื่อทราบ`;
+  
+  if (CONFIG.IS_TESTING_MODE) {
+    const testSubject = "[TEST MODE] " + subjectDisapproved;
+    const originalRecipients = [email, approver, 'kukiat.k@niyomchai.com'].filter(Boolean).join(', ');
+    const testBody = bodyDisapproved + `\n\n--- (Test Mode: Original recipients would be: ${originalRecipients}) ---`;
+    MailApp.sendEmail(CONFIG.TEST_EMAIL_RECIPIENT, testSubject, testBody);
+    Logger.log(`TEST MODE: ส่งอีเมลปฏิเสธไปที่ ${CONFIG.TEST_EMAIL_RECIPIENT} สำเร็จ`);
+  } else {
+    MailApp.sendEmail(email, subjectDisapproved, bodyDisapproved);
+    MailApp.sendEmail(approver, subjectDisapproved, bodyDisapproved);
+    MailApp.sendEmail('kukiat.k@niyomchai.com', subjectDisapproved, bodyDisapproved);
+    Logger.log("ส่งอีเมลปฏิเสธสำเร็จ (โหมดใช้งานจริง)");
+  }
+  
+  if (token && chatId) {
+    sendTelegramNotify(token, chatId, message2);
+    Logger.log("ส่งข้อความ Telegram สำเร็จ");
+  } else {
+    Logger.log("ไม่ได้กำหนดค่า TOKEN หรือ CHAT ID สำหรับ Telegram");
+  }
+  sendChatNotigoogle(message2);
+  Logger.log("ส่งข้อความ Google Chat สำเร็จ");
+}
