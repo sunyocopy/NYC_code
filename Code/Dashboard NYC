@@ -1,0 +1,763 @@
+//code.gs
+/**
+ * Material Receiving and Logistics Dashboard
+ * Google Apps Script Backend (Code.gs)
+ */
+
+function doGet(e) {
+  return HtmlService.createTemplateFromFile('index')
+    .evaluate()
+    .setTitle('ระบบติดตามการรับวัสดุ & ขนส่ง | Dumpman')
+    .addMetaTag('viewport', 'width=device-width, initial-scale=1')
+    .setXFrameOptionsMode(HtmlService.XFrameOptionsMode.ALLOWALL);
+}
+
+// รวมไฟล์ย่อยหากต้องการแยก CSS / JS
+function include(filename) {
+  return HtmlService.createHtmlOutputFromFile(filename).getContent();
+}
+
+/**
+ * ดึงข้อมูล Dashboard ทั้งหมด (สถิติ, รายการรับเข้า, สายทาง)
+ */
+function getDashboardData() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  
+  // 1. ดึงข้อมูลจากชีต InputData
+  const inputSheet = ss.getSheetByName('InputData');
+  let records = [];
+  if (inputSheet && inputSheet.getLastRow() > 1) {
+    const rawData = inputSheet.getDataRange().getValues();
+    const headers = rawData[0];
+    
+    // ค้นหา index ของแต่ละคอลัมน์
+    const colIdx = {
+      id: headers.findIndex(h => /ID/i.test(h)),
+      route: headers.findIndex(h => /สายทาง/i.test(h)),
+      dateTime: headers.findIndex(h => /วัน|เวลา/i.test(h)),
+      dumpmanId: headers.findIndex(h => /Dumpman/i.test(h)),
+      receiver: headers.findIndex(h => /คนรับวัสดุ/i.test(h)),
+      plate: headers.findIndex(h => /ทะเบียน/i.test(h)),
+      driver: headers.findIndex(h => /คนขับ/i.test(h)),
+      material: headers.findIndex(h => /ประเภทวัสดุ/i.test(h)),
+      quantity: headers.findIndex(h => /จำนวน/i.test(h)),
+      unit: headers.findIndex(h => /หน่วย/i.test(h)),
+      source: headers.findIndex(h => /แหล่ง/i.test(h)),
+      startKm: headers.findIndex(h => /กม\.เริ่มต้น/i.test(h)),
+      endSta: headers.findIndex(h => /สิ้นสุด/i.test(h)),
+      distance: headers.findIndex(h => /ระยะทาง/i.test(h)),
+      freightRate: headers.findIndex(h => /อัตราค่า/i.test(h)),
+      freightCost: headers.findIndex(h => /ค่าบรรทุกรวม/i.test(h)),
+      photo: headers.findIndex(h => /รูปภาพ/i.test(h)),
+      file: headers.findIndex(h => /File/i.test(h))
+    };
+
+    for (let i = 1; i < rawData.length; i++) {
+      const row = rawData[i];
+      if (!row[colIdx.id] && !row[colIdx.route]) continue;
+
+      let dtStr = '';
+      if (row[colIdx.dateTime] instanceof Date) {
+        dtStr = Utilities.formatDate(row[colIdx.dateTime], 'Asia/Bangkok', 'yyyy-MM-dd HH:mm');
+      } else {
+        dtStr = String(row[colIdx.dateTime] || '');
+      }
+
+      records.push({
+        rowIndex: i + 1, // บรรทัดจริงใน Sheet (1-based)
+        id: String(row[colIdx.id] || ''),
+        route: String(row[colIdx.route] || '').trim(),
+        dateTime: dtStr,
+        dumpmanId: String(row[colIdx.dumpmanId] || ''),
+        receiver: String(row[colIdx.receiver] || ''),
+        plate: String(row[colIdx.plate] || ''),
+        driver: String(row[colIdx.driver] || ''),
+        material: String(row[colIdx.material] || 'ไม่ระบุ'),
+        quantity: Number(row[colIdx.quantity]) || 0,
+        unit: String(row[colIdx.unit] || 'ตัน'),
+        source: String(row[colIdx.source] || 'ไม่ระบุแหล่ง'),
+        startKm: String(row[colIdx.startKm] || ''),
+        endSta: String(row[colIdx.endSta] || ''),
+        distance: Number(row[colIdx.distance]) || 0,
+        freightRate: Number(row[colIdx.freightRate]) || 0,
+        freightCost: Number(row[colIdx.freightCost]) || 0,
+        photo: String(row[colIdx.photo] || ''),
+        file: String(row[colIdx.file] || '')
+      });
+    }
+  }
+
+  // 2. ดึงข้อมูลชีต Route
+  const routeSheet = ss.getSheetByName('Route');
+  let routes = [];
+  if (routeSheet && routeSheet.getLastRow() > 1) {
+    const routeData = routeSheet.getDataRange().getValues();
+    for (let r = 1; r < routeData.length; r++) {
+      const code = String(routeData[r][0] || '').trim();
+      if (code) {
+        routes.push({
+          code: code,
+          contract: String(routeData[r][1] || '-'),
+          name: String(routeData[r][2] || '-')
+        });
+      }
+    }
+  }
+
+  // 3. สรุปผลตัวเลขสถิติ (KPIs)
+  let totalTons = 0;
+  let totalFreight = 0;
+  const materialMap = {};
+  const routeMap = {};
+  const driverMap = {};
+  const sourceMap = {};
+
+  records.forEach(item => {
+    totalTons += item.quantity;
+    totalFreight += item.freightCost;
+
+    // แยกตามวัสดุ
+    if (!materialMap[item.material]) materialMap[item.material] = { name: item.material, tons: 0, count: 0 };
+    materialMap[item.material].tons += item.quantity;
+    materialMap[item.material].count++;
+
+    // แยกตามสายทาง
+    if (!routeMap[item.route]) routeMap[item.route] = { code: item.route, tons: 0, count: 0 };
+    routeMap[item.route].tons += item.quantity;
+    routeMap[item.route].count++;
+
+    // แยกตามคนขับ
+    const dName = item.driver || 'ไม่ระบุคนขับ';
+    if (!driverMap[dName]) driverMap[dName] = { driver: dName, tons: 0, count: 0, plates: {} };
+    driverMap[dName].tons += item.quantity;
+    driverMap[dName].count++;
+    if (item.plate) driverMap[dName].plates[item.plate] = true;
+
+    // แยกตามแหล่งรับ
+    const sName = item.source || 'ไม่ระบุ';
+    if (!sourceMap[sName]) sourceMap[sName] = { source: sName, tons: 0, count: 0 };
+    sourceMap[sName].tons += item.quantity;
+    sourceMap[sName].count++;
+  });
+
+  return {
+    kpi: {
+      totalDeliveries: records.length,
+      totalTonnage: totalTons,
+      totalFreight: totalFreight,
+      routeCount: Object.keys(routeMap).length,
+      driverCount: Object.keys(driverMap).length
+    },
+    breakdowns: {
+      materials: Object.values(materialMap).sort((a, b) => b.tons - a.tons),
+      routes: Object.values(routeMap).sort((a, b) => b.tons - a.tons),
+      drivers: Object.values(driverMap).map(d => ({
+        driver: d.driver,
+        tons: d.tons,
+        count: d.count,
+        plates: Object.keys(d.plates)
+      })).sort((a, b) => b.tons - a.tons),
+      sources: Object.values(sourceMap).sort((a, b) => b.tons - a.tons)
+    },
+    records: records.reverse(), // แสดงล่าสุดก่อน
+    routesList: routes
+  };
+}
+
+/**
+ * บันทึกข้อมูลการรับวัสดุใหม่เข้าชีต InputData
+ */
+function createReceivingRecord(formData) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('InputData');
+    if (!sheet) throw new Error("ไม่พบชีต 'InputData'");
+
+    const newId = 'RC-' + Utilities.formatDate(new Date(), 'Asia/Bangkok', 'yyMMdd') + '-' + Math.floor(1000 + Math.random() * 9000);
+    const dateVal = formData.dateTime ? new Date(formData.dateTime) : new Date();
+
+    const newRow = [
+      newId,
+      formData.route || '',
+      dateVal,
+      formData.dumpmanId || '',
+      formData.receiver || '',
+      formData.plate || '',
+      formData.driver || '',
+      formData.material || '',
+      Number(formData.quantity) || 0,
+      formData.unit || 'ตัน',
+      formData.source || '',
+      formData.startKm || '',
+      formData.endSta || '',
+      Number(formData.distance) || 0,
+      Number(formData.freightRate) || 0,
+      Number(formData.freightCost) || 0,
+      formData.photo || '',
+      formData.file || ''
+    ];
+
+    sheet.appendRow(newRow);
+    return { success: true, message: 'บันทึกสำเร็จ รหัส: ' + newId };
+  } catch (err) {
+    return { success: false, message: err.toString() };
+  }
+}
+
+/**
+ * ลบรายการตาม Row Index
+ */
+function deleteReceivingRecord(rowIndex) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('InputData');
+    if (!sheet) throw new Error("ไม่พบชีต 'InputData'");
+
+    if (rowIndex > 1 && rowIndex <= sheet.getLastRow()) {
+      sheet.deleteRow(rowIndex);
+      return { success: true, message: 'ลบข้อมูลเรียบร้อยแล้ว' };
+    }
+    throw new Error('ไม่พบบรรทัดที่ต้องการลบ');
+  } catch (err) {
+    return { success: false, message: err.toString() };
+  }
+}
+//-----------------------------------------------------------
+<!-- index.html -->
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Material Receiving & Logistics Dashboard</title>
+  
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- ตั้งค่าสี Custom จากพาเลตต์ -->
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              orange: '#EB5B38',
+              dark: '#272A2D',   
+              light: '#E6E4DC',  
+              blue: '#347CCB'    
+            }
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- SweetAlert2, Chart.js & ChartDataLabels CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <!-- เพิ่มปลั๊กอินสำหรับแสดง Label บนกราฟ -->
+  <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.0.0"></script>
+
+  <!-- Google Fonts: Prompt -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  
+  <style>
+    body { font-family: 'Prompt', sans-serif; }
+    .no-scrollbar::-webkit-scrollbar { display: none; }
+    .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    
+    .loader {
+      border-top-color: #EB5B38;
+      animation: spinner 0.8s linear infinite;
+    }
+    @keyframes spinner {
+      0% { transform: rotate(0deg); }
+      100% { transform: rotate(360deg); }
+    }
+    
+    /* สไตล์ Glassmorphism */
+    .glass-panel {
+      background: rgba(255, 255, 255, 0.45);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.6);
+      box-shadow: 0 8px 32px rgba(39, 42, 45, 0.08); 
+    }
+    
+    .glass-input {
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.8);
+      backdrop-filter: blur(4px);
+      color: #272A2D;
+    }
+    .glass-input:focus {
+      background: rgba(255, 255, 255, 0.9);
+      outline: none;
+      box-shadow: 0 0 0 2px rgba(235, 91, 56, 0.4); 
+    }
+
+    .swal2-popup.custom-swal {
+      border-radius: 1.5rem !important;
+      font-family: 'Prompt', sans-serif;
+      background: #E6E4DC;
+    }
+  </style>
+</head>
+
+<body class="bg-brand-light text-brand-dark min-h-screen flex flex-col relative overflow-x-hidden">
+
+  <!-- Background Orbs -->
+  <div class="fixed inset-0 pointer-events-none z-0 overflow-hidden">
+    <div class="absolute top-[-5%] left-[-5%] w-96 h-96 bg-brand-orange/20 rounded-full blur-3xl"></div>
+    <div class="absolute top-[40%] right-[-10%] w-[30rem] h-[30rem] bg-brand-blue/15 rounded-full blur-3xl"></div>
+    <div class="absolute bottom-[-10%] left-[20%] w-80 h-80 bg-brand-orange/10 rounded-full blur-3xl"></div>
+  </div>
+
+  <!-- Top Navigation Bar -->
+  <header class="glass-panel sticky top-0 z-30 shadow-sm border-b-white/50">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      <div class="flex flex-col md:flex-row md:items-center justify-between py-3 gap-3 md:h-20">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center space-x-3">
+            <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-brand-orange to-brand-blue flex items-center justify-center text-white shadow-lg shadow-brand-orange/30 text-xl">🚚</div>
+            <div>
+              <h1 class="text-sm sm:text-base font-bold leading-tight">ระบบติดตามการรับวัสดุ & ขนส่ง</h1>
+              <p class="text-xs text-brand-dark/60">Material Receiving Dashboard</p>
+            </div>
+          </div>
+          <button onclick="openModal()" class="md:hidden flex items-center gap-1.5 bg-brand-orange hover:bg-[#d64b2a] text-white text-xs font-semibold px-4 py-2.5 rounded-xl shadow-md transition">➕ บันทึก</button>
+        </div>
+
+        <nav class="flex space-x-2 overflow-x-auto no-scrollbar pb-1 w-full md:w-auto">
+          <button onclick="switchTab('overview')" id="tab-btn-overview" class="shrink-0 px-5 py-2.5 rounded-xl text-sm font-bold text-brand-orange bg-white/80 border border-brand-orange/30 shadow-sm backdrop-blur-md transition">📊 ภาพรวม (Overview)</button>
+          <button onclick="switchTab('records')" id="tab-btn-records" class="shrink-0 px-5 py-2.5 rounded-xl text-sm font-medium text-brand-dark/70 bg-white/40 hover:bg-white/70 border border-white/50 shadow-sm transition">📦 รายการ (Log)</button>
+          <button onclick="switchTab('routes')" id="tab-btn-routes" class="shrink-0 px-5 py-2.5 rounded-xl text-sm font-medium text-brand-dark/70 bg-white/40 hover:bg-white/70 border border-white/50 shadow-sm transition">📍 สายทาง & สัญญา</button>
+        </nav>
+
+        <button onclick="openModal()" class="hidden md:flex items-center gap-2 bg-gradient-to-r from-brand-orange to-[#ff7a59] hover:from-[#d64b2a] hover:to-brand-orange text-white text-sm font-semibold px-5 py-2.5 rounded-xl shadow-lg shadow-brand-orange/30 transition transform hover:scale-105 active:scale-95">➕ บันทึกข้อมูลใหม่</button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Loading State -->
+  <div id="loading" class="flex-1 flex flex-col items-center justify-center py-32 relative z-10">
+    <div class="loader ease-linear rounded-full border-4 border-t-4 border-white/50 h-14 w-14 mb-4 backdrop-blur-sm"></div>
+    <p class="text-sm text-brand-dark/70 font-medium bg-white/60 px-4 py-2 rounded-full backdrop-blur border border-white/60">กำลังโหลดข้อมูล...</p>
+  </div>
+
+  <!-- Main Container -->
+  <main id="main-content" class="hidden flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6 relative z-10 pb-20">
+    
+    <!-- KPI Summary Row -->
+    <section class="grid grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
+      <div class="glass-panel rounded-2xl p-5 sm:p-6 transition hover:shadow-lg border-b-4 border-b-brand-orange">
+        <p class="text-xs font-semibold text-brand-dark/60 uppercase tracking-wider mb-1">ปริมาณรับสะสม (ตัน)</p>
+        <div class="flex items-baseline space-x-1">
+          <span id="kpi-tons" class="text-2xl sm:text-3xl font-bold text-brand-orange">0.00</span>
+        </div>
+      </div>
+      <div class="glass-panel rounded-2xl p-5 sm:p-6 transition hover:shadow-lg">
+        <p class="text-xs font-semibold text-brand-dark/60 uppercase tracking-wider mb-1">เที่ยวขนส่ง (เที่ยว)</p>
+        <div class="flex items-baseline space-x-1">
+          <span id="kpi-deliveries" class="text-2xl sm:text-3xl font-bold text-brand-blue">0</span>
+        </div>
+      </div>
+      <div class="glass-panel rounded-2xl p-5 sm:p-6 transition hover:shadow-lg">
+        <p class="text-xs font-semibold text-brand-dark/60 uppercase tracking-wider mb-1">สายทางดำเนินการ</p>
+        <div class="flex items-baseline space-x-1">
+          <span id="kpi-routes" class="text-2xl sm:text-3xl font-bold text-brand-dark">0</span>
+        </div>
+      </div>
+      <div class="glass-panel rounded-2xl p-5 sm:p-6 transition hover:shadow-lg border-b-4 border-b-brand-blue">
+        <p class="text-xs font-semibold text-brand-dark/60 uppercase tracking-wider mb-1">ค่าบรรทุกรวม</p>
+        <div class="flex items-baseline space-x-1">
+          <span id="kpi-freight" class="text-2xl sm:text-3xl font-bold text-brand-dark">฿0</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- SECTION 1: OVERVIEW -->
+    <div id="view-overview" class="space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div class="glass-panel rounded-2xl p-5 sm:p-6">
+          <div class="flex items-center gap-2 mb-4">
+            <div class="w-8 h-8 rounded-lg bg-brand-orange/20 flex items-center justify-center text-brand-orange">🪨</div>
+            <div>
+              <h2 class="text-base font-bold leading-tight">ปริมาณตามประเภทวัสดุ</h2>
+              <p class="text-xs text-brand-dark/60">Volume by Material</p>
+            </div>
+          </div>
+          <div id="material-list" class="space-y-4"></div>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5 sm:p-6">
+          <div class="flex items-center gap-2 mb-4">
+            <div class="w-8 h-8 rounded-lg bg-brand-blue/20 flex items-center justify-center text-brand-blue">🛣️</div>
+            <div>
+              <h2 class="text-base font-bold leading-tight">ปริมาณตามสายทาง</h2>
+              <p class="text-xs text-brand-dark/60">Volume by Route</p>
+            </div>
+          </div>
+          <div id="route-list" class="space-y-3"></div>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5 sm:p-6">
+          <div class="flex items-center gap-2 mb-4">
+            <div class="w-8 h-8 rounded-lg bg-brand-dark/10 flex items-center justify-center text-brand-dark">🏭</div>
+            <div>
+              <h2 class="text-base font-bold leading-tight">แหล่งรับวัสดุ / โรงโม่</h2>
+              <p class="text-xs text-brand-dark/60">Material Source</p>
+            </div>
+          </div>
+          <div id="source-list" class="space-y-2"></div>
+        </div>
+      </div>
+
+      <!-- กราฟโดนัท (แถวล่าง) -->
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-6">
+        <div class="glass-panel rounded-2xl p-5 sm:p-6 flex flex-col items-center">
+          <h2 class="text-sm font-bold text-brand-dark mb-4 bg-white/60 px-4 py-1.5 rounded-full border border-white/60 shadow-sm">สัดส่วนประเภทวัสดุ (%)</h2>
+          <div class="relative w-full h-64 flex justify-center">
+            <canvas id="materialChart"></canvas>
+          </div>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5 sm:p-6 flex flex-col items-center">
+          <h2 class="text-sm font-bold text-brand-dark mb-4 bg-white/60 px-4 py-1.5 rounded-full border border-white/60 shadow-sm">สัดส่วนตามสายทาง (%)</h2>
+          <div class="relative w-full h-64 flex justify-center">
+            <canvas id="routeChart"></canvas>
+          </div>
+        </div>
+
+        <div class="glass-panel rounded-2xl p-5 sm:p-6 flex flex-col items-center">
+          <h2 class="text-sm font-bold text-brand-dark mb-4 bg-white/60 px-4 py-1.5 rounded-full border border-white/60 shadow-sm">สัดส่วนแหล่งรับวัสดุ (%)</h2>
+          <div class="relative w-full h-64 flex justify-center">
+            <canvas id="sourceChart"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SECTION 2: RECEIVING LOG TABLE -->
+    <div id="view-records" class="hidden space-y-4">
+      <div class="glass-panel rounded-2xl p-4 flex flex-col md:flex-row gap-4 justify-between items-center">
+        <div class="relative w-full md:w-96">
+          <span class="absolute inset-y-0 left-0 flex items-center pl-3 text-brand-dark/40">🔍</span>
+          <input type="text" id="search-input" onkeyup="renderTable()" placeholder="ค้นหา สายทาง, คนขับ, ทะเบียน..." class="glass-input w-full pl-9 pr-4 py-3 rounded-xl text-sm transition"/>
+        </div>
+        <div class="flex flex-col sm:flex-row gap-3 w-full md:w-auto">
+          <select id="filter-material" onchange="renderTable()" class="glass-input w-full sm:w-40 py-3 px-4 rounded-xl text-sm cursor-pointer appearance-none">
+            <option value="ALL">📦 ทุกประเภท</option>
+          </select>
+          <select id="filter-route" onchange="renderTable()" class="glass-input w-full sm:w-40 py-3 px-4 rounded-xl text-sm cursor-pointer appearance-none">
+            <option value="ALL">📍 ทุกสายทาง</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="glass-panel rounded-2xl overflow-hidden shadow-lg border border-white/60">
+        <div class="overflow-x-auto no-scrollbar">
+          <table class="w-full text-left text-sm min-w-[800px]">
+            <thead>
+              <tr class="bg-white/60 font-semibold border-b border-white/60 backdrop-blur-md">
+                <th class="py-4 px-5 whitespace-nowrap">ID / วันที่</th>
+                <th class="py-4 px-5 whitespace-nowrap">สายทาง</th>
+                <th class="py-4 px-5 whitespace-nowrap">ประเภทวัสดุ</th>
+                <th class="py-4 px-5 whitespace-nowrap text-right">จำนวน</th>
+                <th class="py-4 px-5 whitespace-nowrap">คนขับ / ทะเบียน</th>
+                <th class="py-4 px-5 whitespace-nowrap">แหล่งรับวัสดุ</th>
+                <th class="py-4 px-5 whitespace-nowrap text-right">ค่าบรรทุก</th>
+                <th class="py-4 px-5 whitespace-nowrap text-center">จัดการ</th>
+              </tr>
+            </thead>
+            <tbody id="table-body" class="divide-y divide-white/40"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- SECTION 3: ROUTES -->
+    <div id="view-routes" class="hidden">
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6" id="routes-grid"></div>
+    </div>
+  </main>
+
+  <!-- MODAL: ADD RECORD -->
+  <div id="modal-form" class="fixed inset-0 z-50 bg-brand-dark/50 backdrop-blur-sm hidden items-center justify-center p-4 transition-opacity">
+    <div class="glass-panel rounded-3xl max-w-lg w-full p-6 sm:p-8 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto no-scrollbar relative bg-white/80">
+      <div class="flex justify-between items-center border-b border-brand-dark/10 pb-4">
+        <h3 class="text-lg font-bold text-brand-orange">📝 บันทึกรับวัสดุใหม่</h3>
+        <button onclick="closeModal()" class="w-8 h-8 bg-white/60 hover:bg-white/90 border border-white/60 rounded-full flex items-center justify-center text-brand-dark/60 hover:text-brand-orange transition">✕</button>
+      </div>
+
+      <form id="record-form" onsubmit="handleFormSubmit(event)" class="space-y-4 text-sm">
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div><label class="block font-semibold mb-1.5 ml-1">รหัสสายทาง <span class="text-brand-orange">*</span></label><input type="text" name="route" required class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div><label class="block font-semibold mb-1.5 ml-1">ประเภทวัสดุ <span class="text-brand-orange">*</span></label><input type="text" name="material" required class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div><label class="block font-semibold mb-1.5 ml-1">ปริมาณวัสดุ <span class="text-brand-orange">*</span></label><input type="number" step="any" name="quantity" required class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div><label class="block font-semibold mb-1.5 ml-1">หน่วยนับ</label><input type="text" name="unit" value="ตัน" class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div><label class="block font-semibold mb-1.5 ml-1">ชื่อคนขับรถ</label><input type="text" name="driver" class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div><label class="block font-semibold mb-1.5 ml-1">ทะเบียนรถ</label><input type="text" name="plate" class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div class="sm:col-span-2"><label class="block font-semibold mb-1.5 ml-1">แหล่งรับวัสดุ</label><input type="text" name="source" class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div><label class="block font-semibold mb-1.5 ml-1">ผู้รับวัสดุ</label><input type="text" name="receiver" class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+          <div><label class="block font-semibold mb-1.5 ml-1">ค่าบรรทุก (บาท)</label><input type="number" step="any" name="freightCost" class="glass-input w-full px-4 py-3 rounded-xl" /></div>
+        </div>
+        <div class="flex justify-end gap-3 pt-5 border-t border-brand-dark/10 mt-4">
+          <button type="button" onclick="closeModal()" class="px-5 py-3 rounded-xl text-brand-dark/80 bg-white/60 hover:bg-white/90 border border-white/60 transition font-medium">ยกเลิก</button>
+          <button type="submit" id="submit-btn" class="px-6 py-3 bg-brand-orange hover:bg-[#d64b2a] text-white font-bold rounded-xl shadow-lg shadow-brand-orange/30 transition transform hover:-translate-y-0.5">บันทึกข้อมูล</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- SCRIPT FRONTEND LOGIC -->
+  <script>
+    let appData = { kpi: {}, breakdowns: {}, records: [], routesList: [] };
+    let chart1, chart2, chart3; 
+
+    // ลงทะเบียน Plugin สำหรับแสดง DataLabels
+    Chart.register(ChartDataLabels);
+    Chart.defaults.font.family = "'Prompt', sans-serif";
+    Chart.defaults.color = "#272A2D";
+
+    const chartColors = [
+      '#EB5B38', // ส้ม
+      '#347CCB', // ฟ้า
+      '#272A2D', // ดำ/เทาเข้ม
+      '#F49D85', // ส้มอ่อน
+      '#7AAAE1', // ฟ้าอ่อน
+      '#555B61'  // เทากลาง
+    ];
+
+    window.onload = function() { fetchDashboard(); };
+
+    function fetchDashboard() {
+      google.script.run
+        .withSuccessHandler(function(response) {
+          appData = response;
+          renderDashboard();
+          document.getElementById('loading').classList.add('hidden');
+          document.getElementById('main-content').classList.remove('hidden');
+        })
+        .withFailureHandler(function(err) {
+          Swal.fire({ icon: 'error', title: 'ไม่สามารถโหลดข้อมูลได้', text: err, customClass: { popup: 'custom-swal' } });
+        })
+        .getDashboardData();
+    }
+
+    function renderDashboard() {
+      document.getElementById('kpi-tons').innerText = Number(appData.kpi.totalTonnage || 0).toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 2});
+      document.getElementById('kpi-deliveries').innerText = Number(appData.kpi.totalDeliveries || 0).toLocaleString();
+      document.getElementById('kpi-routes').innerText = Number(appData.kpi.routeCount || 0).toLocaleString();
+      document.getElementById('kpi-freight').innerText = '฿' + Number(appData.kpi.totalFreight || 0).toLocaleString();
+
+      const matDiv = document.getElementById('material-list');
+      matDiv.innerHTML = '';
+      appData.breakdowns.materials.forEach(m => {
+        const pct = appData.kpi.totalTonnage > 0 ? ((m.tons / appData.kpi.totalTonnage) * 100).toFixed(1) : 0;
+        matDiv.innerHTML += `
+          <div class="mb-4 last:mb-0">
+            <div class="flex justify-between items-center text-sm font-semibold mb-2">
+              <span>${m.name}</span>
+              <span class="text-brand-orange bg-white/80 border border-white/90 px-2.5 py-1 rounded-lg text-xs shadow-sm">${m.tons.toLocaleString()} ตัน <span class="text-brand-dark/50 ml-1">${pct}%</span></span>
+            </div>
+            <div class="w-full bg-white/50 rounded-full h-3 shadow-inner overflow-hidden border border-white/60">
+              <div class="bg-gradient-to-r from-[#ff7a59] to-brand-orange h-full rounded-full transition-all duration-1000" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
+      });
+
+      const rtDiv = document.getElementById('route-list');
+      rtDiv.innerHTML = '';
+      appData.breakdowns.routes.forEach(r => {
+        const pct = appData.kpi.totalTonnage > 0 ? ((r.tons / appData.kpi.totalTonnage) * 100).toFixed(1) : 0;
+        rtDiv.innerHTML += `
+          <div class="p-4 bg-white/50 rounded-2xl border border-white/70 mb-3 last:mb-0 shadow-sm hover:bg-white/70 transition">
+            <div class="flex justify-between items-center text-sm font-semibold mb-2">
+              <span class="text-brand-blue bg-brand-blue/10 px-3 py-1 rounded-lg border border-brand-blue/20">${r.code}</span>
+              <span>${r.tons.toLocaleString()} ตัน</span>
+            </div>
+            <div class="w-full bg-white/60 rounded-full h-2 mb-2 shadow-inner overflow-hidden border border-white/60">
+              <div class="bg-brand-blue h-full rounded-full" style="width: ${pct}%"></div>
+            </div>
+          </div>
+        `;
+      });
+
+      const srcDiv = document.getElementById('source-list');
+      srcDiv.innerHTML = '';
+      appData.breakdowns.sources.forEach(s => {
+        srcDiv.innerHTML += `
+          <div class="flex justify-between items-center p-3.5 rounded-xl bg-white/50 border border-white/70 mb-3 last:mb-0 shadow-sm text-sm">
+            <span class="font-medium flex items-center gap-2">📍 ${s.source}</span>
+            <span class="font-bold bg-white/80 px-3 py-1.5 rounded-lg border border-white/60">${s.tons.toLocaleString()} ตัน</span>
+          </div>
+        `;
+      });
+      
+      // การตั้งค่า ChartOptions รวมถึง DataLabels
+      const chartOptions = {
+        responsive: true, 
+        maintainAspectRatio: false, 
+        cutout: '65%',
+        plugins: {
+          legend: { position: 'bottom', labels: { boxWidth: 12, padding: 15 } },
+          tooltip: {
+            callbacks: {
+              label: function(context) {
+                const value = context.raw || 0;
+                const total = context.chart._metasets[context.datasetIndex].total;
+                const percentage = total > 0 ? ((value / total) * 100).toFixed(1) : 0;
+                return ` ${context.label}: ${value.toLocaleString()} ตัน (${percentage}%)`;
+              }
+            }
+          },
+          datalabels: {
+            color: '#ffffff', // สีตัวหนังสือบนกราฟ
+            font: { weight: 'bold', size: 12 },
+            formatter: (value, ctx) => {
+              const dataArr = ctx.chart.data.datasets[0].data;
+              const total = dataArr.reduce((a, b) => a + b, 0);
+              if (total === 0) return '';
+              const percentage = (value * 100 / total).toFixed(1);
+              // ซ่อน Label หากเปอร์เซ็นต์น้อยกว่า 5% เพื่อไม่ให้ข้อความซ้อนกัน
+              return percentage > 5 ? percentage + '%' : '';
+            }
+          }
+        }
+      };
+
+      const ctxMat = document.getElementById('materialChart').getContext('2d');
+      if(chart1) chart1.destroy();
+      chart1 = new Chart(ctxMat, { type: 'doughnut', data: { labels: appData.breakdowns.materials.map(m => m.name), datasets: [{ data: appData.breakdowns.materials.map(m => m.tons), backgroundColor: chartColors, borderWidth: 2, borderColor: '#E6E4DC' }] }, options: chartOptions });
+
+      const ctxRt = document.getElementById('routeChart').getContext('2d');
+      if(chart2) chart2.destroy();
+      chart2 = new Chart(ctxRt, { type: 'doughnut', data: { labels: appData.breakdowns.routes.map(r => r.code), datasets: [{ data: appData.breakdowns.routes.map(r => r.tons), backgroundColor: chartColors, borderWidth: 2, borderColor: '#E6E4DC' }] }, options: chartOptions });
+
+      const ctxSrc = document.getElementById('sourceChart').getContext('2d');
+      if(chart3) chart3.destroy();
+      chart3 = new Chart(ctxSrc, { type: 'doughnut', data: { labels: appData.breakdowns.sources.map(s => s.source), datasets: [{ data: appData.breakdowns.sources.map(s => s.tons), backgroundColor: chartColors, borderWidth: 2, borderColor: '#E6E4DC' }] }, options: chartOptions });
+
+      const matSelect = document.getElementById('filter-material');
+      matSelect.innerHTML = '<option value="ALL">📦 ทุกประเภทวัสดุ</option>';
+      appData.breakdowns.materials.forEach(m => matSelect.innerHTML += `<option value="${m.name}">${m.name}</option>`);
+
+      const rtSelect = document.getElementById('filter-route');
+      rtSelect.innerHTML = '<option value="ALL">📍 ทุกสายทาง</option>';
+      appData.breakdowns.routes.forEach(r => rtSelect.innerHTML += `<option value="${r.code}">${r.code}</option>`);
+
+      const rGrid = document.getElementById('routes-grid');
+      rGrid.innerHTML = '';
+      appData.routesList.forEach(r => {
+        rGrid.innerHTML += `
+          <div class="glass-panel p-6 rounded-3xl hover:shadow-xl hover:bg-white/70 transition flex flex-col group border border-white/70">
+            <div class="self-start px-3.5 py-1.5 rounded-xl text-sm font-bold bg-brand-orange text-white shadow-sm mb-4">${r.code}</div>
+            <h3 class="font-bold text-lg">${r.name}</h3>
+            <div class="mt-auto pt-5"><p class="text-sm bg-white/60 rounded-lg p-3">สัญญา: <span class="font-medium">${r.contract}</span></p></div>
+          </div>
+        `;
+      });
+
+      renderTable();
+    }
+
+    function renderTable() {
+      const q = (document.getElementById('search-input').value || '').toLowerCase();
+      const fMat = document.getElementById('filter-material').value;
+      const fRt = document.getElementById('filter-route').value;
+      const tbody = document.getElementById('table-body');
+      tbody.innerHTML = '';
+
+      const filtered = appData.records.filter(r => {
+        if (fMat !== 'ALL' && r.material !== fMat) return false;
+        if (fRt !== 'ALL' && r.route !== fRt) return false;
+        if (q) return r.id.toLowerCase().includes(q) || r.route.toLowerCase().includes(q) || r.material.toLowerCase().includes(q);
+        return true;
+      });
+
+      if (filtered.length === 0) {
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center py-10 font-medium">📭 ไม่พบรายการข้อมูลที่ค้นหา</td></tr>`;
+        return;
+      }
+
+      filtered.forEach(item => {
+        tbody.innerHTML += `
+          <tr class="hover:bg-white/60 border-b border-white/40 transition">
+            <td class="py-4 px-5 font-mono whitespace-nowrap"><div class="font-bold">${item.id}</div><div class="text-xs opacity-60">${item.dateTime}</div></td>
+            <td class="py-4 px-5 whitespace-nowrap"><span class="px-3 py-1.5 rounded-lg font-bold bg-brand-orange/10 text-brand-orange border border-brand-orange/20">${item.route}</span></td>
+            <td class="py-4 px-5 font-medium whitespace-nowrap">${item.material}</td>
+            <td class="py-4 px-5 text-right font-bold whitespace-nowrap">${item.quantity} ${item.unit}</td>
+            <td class="py-4 px-5 whitespace-nowrap">${item.driver || '-'} <br><span class="text-xs bg-white/70 px-1 rounded">${item.plate || '-'}</span></td>
+            <td class="py-4 px-5 whitespace-nowrap">${item.source}</td>
+            <td class="py-4 px-5 text-right font-bold text-brand-orange whitespace-nowrap">฿${item.freightCost.toLocaleString()}</td>
+            <td class="py-4 px-5 text-center whitespace-nowrap">
+              <button onclick="deleteRecord(${item.rowIndex})" class="text-rose-500 hover:bg-white/70 px-3 py-2 rounded-xl transition font-medium">ลบ</button>
+            </td>
+          </tr>
+        `;
+      });
+    }
+
+    function switchTab(tab) {
+      ['overview', 'records', 'routes'].forEach(t => {
+        document.getElementById('view-' + t).classList.add('hidden');
+        document.getElementById('tab-btn-' + t).className = "shrink-0 px-5 py-2.5 rounded-xl text-sm font-medium text-brand-dark/70 bg-white/40 hover:bg-white/70 border border-white/50 shadow-sm transition";
+      });
+      document.getElementById('view-' + tab).classList.remove('hidden');
+      document.getElementById('tab-btn-' + tab).className = "shrink-0 px-5 py-2.5 rounded-xl text-sm font-bold text-brand-orange bg-white/80 border border-brand-orange/30 shadow-sm backdrop-blur-md transition";
+    }
+
+    function openModal() {
+      const modal = document.getElementById('modal-form');
+      modal.classList.remove('hidden'); modal.classList.add('flex');
+    }
+    function closeModal() {
+      const modal = document.getElementById('modal-form');
+      modal.classList.add('hidden'); modal.classList.remove('flex');
+    }
+
+    function handleFormSubmit(e) {
+      e.preventDefault();
+      const form = document.getElementById('record-form');
+      const formData = {
+        route: form.route.value, material: form.material.value, quantity: form.quantity.value,
+        unit: form.unit.value, driver: form.driver.value, plate: form.plate.value,
+        source: form.source.value, receiver: form.receiver.value, freightCost: form.freightCost.value
+      };
+      const btn = document.getElementById('submit-btn');
+      btn.innerText = 'กำลังบันทึก...'; btn.disabled = true;
+
+      google.script.run.withSuccessHandler(function(res) {
+        btn.innerText = 'บันทึกข้อมูล'; btn.disabled = false;
+        if (res.success) {
+          form.reset(); closeModal();
+          Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ!', showConfirmButton: false, timer: 1500, customClass: { popup: 'custom-swal' } });
+          fetchDashboard(); 
+        } else Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: res.message, customClass: { popup: 'custom-swal' }, confirmButtonColor: '#EB5B38' });
+      }).createReceivingRecord(formData);
+    }
+
+    function deleteRecord(rowIndex) {
+      Swal.fire({
+        title: 'ยืนยันการลบ?', icon: 'warning', showCancelButton: true, confirmButtonColor: '#ef4444', 
+        cancelButtonColor: '#272A2D', confirmButtonText: 'ลบเลย!', cancelButtonText: 'ยกเลิก', customClass: { popup: 'custom-swal' }
+      }).then((result) => {
+        if (result.isConfirmed) {
+          Swal.fire({ title: 'กำลังลบ...', allowOutsideClick: false, showConfirmButton: false, didOpen: () => Swal.showLoading() });
+          google.script.run.withSuccessHandler(function(res) {
+            if (res.success) {
+              Swal.fire({ icon: 'success', title: 'ลบเรียบร้อย!', showConfirmButton: false, timer: 1500, customClass: { popup: 'custom-swal' } });
+              fetchDashboard();
+            } else Swal.fire({ icon: 'error', title: 'ลบไม่สำเร็จ', text: res.message, confirmButtonColor: '#EB5B38' });
+          }).deleteReceivingRecord(rowIndex);
+        }
+      });
+    }
+  </script>
+</body>
+</html>
+<!-------------------------------------------------------------->
