@@ -12,7 +12,7 @@ SWITCH(
 =QUERY(IMPORTRANGE("xxx","xxx!A:P"),"Select Col1,Col6,Col7,Col8,Col9,Col10,Col11,Col16 WHERE Col11='xxx'",1)
 ----------------------------------------------------------------------
 
-DECIMAL(INDEX(SPLIT([Sta.สิ้นสุด], "+"), 1)) + (DECIMAL(INDEX(SPLIT([Sta.สิ้นสุด], "+"), 3)) / 1000.0) + DECIMAL([กม.เริ่มต้น])
+DECIMAL(INDEX(SPLIT([Sta.สิ้นสุด], "+"), 1)) + (DECIMAL(INDEX(SPLIT([Sta.สิ้นสุด], "+"), 2)) / 1000.0) + DECIMAL([กม.เริ่มต้น])
 
 ------------------------------
 
