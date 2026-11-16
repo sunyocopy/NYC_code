@@ -9,4 +9,4 @@ SWITCH(
    LATLONG(0.0, 0.0)
 )
 --------------------------------------------------------
-=QUERY(IMPORTRANGE("1B5ScTPB1oR2wx0mQ9r3OyszNnQIS0k-8cg1WwQcmxhk","เข้าใหม่!A:P"),"Select Col1,Col6,Col7,Col8,Col9,Col10,Col11,Col16 WHERE Col11='ปฏิบัติงาน'",1)
+=QUERY(IMPORTRANGE("xxx","xxx!A:P"),"Select Col1,Col6,Col7,Col8,Col9,Col10,Col11,Col16 WHERE Col11='xxx'",1)
