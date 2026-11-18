@@ -1,7 +1,1 @@
-IF([Sta.สิ้นสุด]="","",DECIMAL([กม.เริ่มต้น]) 
-+ 
-ABS(
-  (DECIMAL(INDEX(SPLIT([Sta.สิ้นสุด], "+"), 1)) + (DECIMAL(INDEX(SPLIT([Sta.สิ้นสุด], "+"), 2)) / 1000.0))
-  - 
-  (DECIMAL(INDEX(SPLIT([Sta.หน้างาน], "+"), 1)) + (DECIMAL(INDEX(SPLIT([Sta.หน้างาน], "+"), 2)) / 1000.0))
-))
+[สายทาง] & "-" & [Sta.สิ้นสุด] & "-"  &  RIGHT("00000" & LEFT(UNIQUEID(),5 ), 5)
