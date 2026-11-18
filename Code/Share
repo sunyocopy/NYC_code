@@ -1,1 +1,6 @@
 [สายทาง] & "-" & [Sta.สิ้นสุด] & "-"  &  RIGHT("00000" & LEFT(UNIQUEID(),5 ), 5)
+
+
+
+------
+ISNOTBLANK([DumpmanID])
