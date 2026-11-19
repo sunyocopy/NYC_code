@@ -1,0 +1,49 @@
+// วางโค้ดนี้ในไฟล์ Code.gs เพียงไฟล์เดียวที่ https://script.google.com (ไม่ต้องเปิดจาก Google Sheet)
+var DEFAULT_SPREADSHEET_ID = 'PUT_YOUR_SPREADSHEET_ID_HERE';
+
+function doGet(e) {
+  try {
+    var paramId = e && e.parameter && e.parameter.id ? String(e.parameter.id).trim() : '';
+    var propId = PropertiesService.getScriptProperties().getProperty('SPREADSHEET_ID') || '';
+    var spreadsheetId = paramId || (DEFAULT_SPREADSHEET_ID !== 'PUT_YOUR_SPREADSHEET_ID_HERE' ? DEFAULT_SPREADSHEET_ID : '') || propId;
+    if (!spreadsheetId) throw new Error('กรุณาระบุ Spreadsheet ID');
+
+    var ss = SpreadsheetApp.openById(spreadsheetId);
+    var tz = Session.getScriptTimeZone();
+    var parseSheet = function(name) {
+      var sheet = ss.getSheetByName(name);
+      if (!sheet) return [];
+      var values = sheet.getDataRange().getDisplayValues();
+      if (values.length <= 1) return [];
+      var headers = values[0].map(function(h) { return String(h).trim(); });
+      return values.slice(1).map(function(row) {
+        var item = {};
+        headers.forEach(function(header, i) {
+          if (!header) return;
+          var val = row[i];
+          if (val instanceof Date) val = Utilities.formatDate(val, tz, 'yyyy-MM-dd HH:mm:ss');
+          item[header] = val !== null && val !== undefined ? val : '';
+        });
+        return item;
+      });
+    };
+
+    var data = {
+      clockin_manager: parseSheet('Clockin_manager'),
+      clockInclockOut: parseSheet('clock'),
+      materialTypes: parseSheet('Materialtype'),
+      materialSources: parseSheet('clockincolckout'),
+      dumpmanUsers: parseSheet('DumpmanID'),
+      boqData: parseSheet('BOQ'),
+      licensePlates: parseSheet('License plate'),
+      users: parseSheet('User')
+    };
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, data: data, fetchedAt: new Date().toISOString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: err.message || String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
